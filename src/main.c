@@ -6,19 +6,11 @@
 #include "driver/ledc.h"
 #include "driver/adc.h"
 
-// ==========================
 // PINES
-// ==========================
-
-// Botones (solo entrada)
 #define PIN_BTN_DER      25
 #define PIN_BTN_IZQ      33
-
-// LEDs
 #define PIN_LED_VERDE    15
 #define PIN_LED_ROJO     14
-
-// Segmentos del display (directos)
 #define PIN_SEG_A        23
 #define PIN_SEG_B        22
 #define PIN_SEG_C        21
@@ -26,22 +18,16 @@
 #define PIN_SEG_E        18
 #define PIN_SEG_F        5
 #define PIN_SEG_G        17
-
-// Comunes del display 3 dígitos (ánodo común)
 #define PIN_DIG_CEN      16
 #define PIN_DIG_DEC      4
 #define PIN_DIG_UNI      32
-
-// Puente H
 #define PIN_HS_LEFT      12
 #define PIN_LS_LEFT      26
 #define PIN_HS_RIGHT     13
 #define PIN_LS_RIGHT     27
-
-// ADC potenciómetro
 #define ADC_CHANNEL      ADC1_CHANNEL_6
 
-// PWM - Reducido a 5kHz por limitación del 4N25
+// PWM
 #define PWM_FREQ_HZ      5000
 #define PWM_RESOLUTION   LEDC_TIMER_8_BIT
 #define PWM_MODE         LEDC_HIGH_SPEED_MODE
@@ -61,21 +47,13 @@ typedef enum
     DIR_LEFT
 } motor_dir_t;
 
-// ==========================
-// VARIABLES GLOBALES
-// ==========================
+// Variables globales de potencia y dirección
 static volatile int percent_power = 0;
 static volatile int pwm_value     = 0;
 static volatile motor_dir_t current_dir   = DIR_RIGHT;
 static volatile motor_dir_t requested_dir = DIR_RIGHT;
 
-// ==========================
-// TABLA DE NÚMEROS 0-9
-// Orden: a b c d e f g
-// Display ÁNODO COMÚN:
-// 0 = segmento encendido
-// 1 = segmento apagado
-// ==========================
+// Tabla de segmentos para dígitos 0-9, ánodo común (0=encendido, 1=apagado)
 static const uint8_t digits_map[10][7] = {
     {0,0,0,0,0,0,1}, // 0
     {1,0,0,1,1,1,1}, // 1
@@ -89,9 +67,7 @@ static const uint8_t digits_map[10][7] = {
     {0,0,0,0,1,0,0}  // 9
 };
 
-// ==========================
-// GPIO
-// ==========================
+// Inicializa todos los GPIO de salida y entrada
 static void gpio_init_all(void)
 {
     gpio_config_t out_conf = {
@@ -111,7 +87,6 @@ static void gpio_init_all(void)
             (1ULL << PIN_DIG_UNI)   |
             (1ULL << PIN_HS_LEFT)   |
             (1ULL << PIN_HS_RIGHT),
-            // PIN_LS_LEFT y PIN_LS_RIGHT los controla LEDC exclusivamente
         .pull_down_en = 0,
         .pull_up_en   = 0,
         .intr_type    = GPIO_INTR_DISABLE
@@ -128,18 +103,14 @@ static void gpio_init_all(void)
     gpio_config(&in_conf);
 }
 
-// ==========================
-// ADC
-// ==========================
+// Configura el ADC a 12 bits con atenuación 11dB
 static void adc_init_all(void)
 {
     adc1_config_width(ADC_WIDTH_BIT_12);
     adc1_config_channel_atten(ADC_CHANNEL, ADC_ATTEN_DB_11);
 }
 
-// ==========================
-// PWM
-// ==========================
+// Configura el timer y canales PWM para los MOSFET de low-side
 static void pwm_init_all(void)
 {
     ledc_timer_config_t timer_conf = {
@@ -174,9 +145,7 @@ static void pwm_init_all(void)
     ledc_channel_config(&ch_right);
 }
 
-// ==========================
-// DISPLAY
-// ==========================
+// Apaga los tres dígitos del display
 static void all_digits_off(void)
 {
     gpio_set_level(PIN_DIG_CEN, 1);
@@ -184,6 +153,7 @@ static void all_digits_off(void)
     gpio_set_level(PIN_DIG_UNI, 1);
 }
 
+// Activa solo el dígito indicado (0=centenas, 1=decenas, 2=unidades)
 static void enable_digit(int digit)
 {
     all_digits_off();
@@ -192,6 +162,7 @@ static void enable_digit(int digit)
     if (digit == 2) gpio_set_level(PIN_DIG_UNI, 0);
 }
 
+// Escribe los segmentos correspondientes al número dado
 static void set_segments(int number)
 {
     if (number < 0 || number > 9) number = 0;
@@ -204,6 +175,7 @@ static void set_segments(int number)
     gpio_set_level(PIN_SEG_G, digits_map[number][6]);
 }
 
+// Refresca el display multiplexado mostrando percent_power
 static void display_task(void *pvParameters)
 {
     int digit = 0;
@@ -253,25 +225,21 @@ static void display_task(void *pvParameters)
     }
 }
 
-// ==========================
-// MOTOR
-// ==========================
-
+// Apaga todos los MOSFET del puente H
 static void motor_off(void)
 {
-    // P-MOS high-side: se APAGA con gate HIGH
-    // GPIO=0 → 4N25 NO conduce → resistor 10K jala gate a 12V → P-MOS OFF
+    // P-MOS high-side: GPIO=0 -> 4N25 no conduce -> gate a 12V -> OFF
     gpio_set_level(PIN_HS_LEFT,  0);
     gpio_set_level(PIN_HS_RIGHT, 0);
 
-    // N-MOS low-side: se APAGA con gate LOW
-    // PWM duty=0 → 4N25 NO conduce → gate a GND → N-MOS OFF
+    // N-MOS low-side: duty=0 -> 4N25 no conduce -> gate a GND -> OFF
     ledc_set_duty(PWM_MODE, PWM_CHANNEL_L, 0);
     ledc_update_duty(PWM_MODE, PWM_CHANNEL_L);
     ledc_set_duty(PWM_MODE, PWM_CHANNEL_R, 0);
     ledc_update_duty(PWM_MODE, PWM_CHANNEL_R);
 }
 
+// Actualiza los LEDs según la dirección actual
 static void update_leds(motor_dir_t dir)
 {
     if (dir == DIR_RIGHT)
@@ -286,26 +254,19 @@ static void update_leds(motor_dir_t dir)
     }
 }
 
+// Aplica dirección y duty al puente H
 static void apply_motor(motor_dir_t dir, int pwm)
 {
     motor_off();
 
     if (pwm <= 0) return;
 
-    // El 4N25 invierte la señal PWM:
-    // duty alto → 4N25 conduce más → gate N-MOS sube → N-MOS más encendido ✅
-    // Por eso NO se invierte el duty aquí, se usa directo.
-    // Lo que sí cambia es la lógica del high-side:
-    // GPIO=1 → 4N25 conduce → gate P-MOS a GND → P-MOS ON ✅
-    // GPIO=0 → 4N25 no conduce → gate P-MOS a 12V → P-MOS OFF ✅
-
+    // GPIO=1 -> 4N25 conduce -> gate P-MOS a GND -> P-MOS ON
     if (dir == DIR_RIGHT)
     {
-        // HS izquierdo ON (P-MOS: GPIO=1 → gate a GND vía 4N25)
         gpio_set_level(PIN_HS_LEFT,  1);
         gpio_set_level(PIN_HS_RIGHT, 0);
 
-        // LS derecho con PWM, LS izquierdo apagado
         ledc_set_duty(PWM_MODE, PWM_CHANNEL_L, 0);
         ledc_update_duty(PWM_MODE, PWM_CHANNEL_L);
         ledc_set_duty(PWM_MODE, PWM_CHANNEL_R, pwm);
@@ -313,11 +274,9 @@ static void apply_motor(motor_dir_t dir, int pwm)
     }
     else // DIR_LEFT
     {
-        // HS derecho ON (P-MOS: GPIO=1 → gate a GND vía 4N25)
         gpio_set_level(PIN_HS_LEFT,  0);
         gpio_set_level(PIN_HS_RIGHT, 1);
 
-        // LS izquierdo con PWM, LS derecho apagado
         ledc_set_duty(PWM_MODE, PWM_CHANNEL_L, pwm);
         ledc_update_duty(PWM_MODE, PWM_CHANNEL_L);
         ledc_set_duty(PWM_MODE, PWM_CHANNEL_R, 0);
@@ -325,6 +284,7 @@ static void apply_motor(motor_dir_t dir, int pwm)
     }
 }
 
+// Detiene el motor, espera y luego aplica la nueva dirección
 static void safe_change_direction(motor_dir_t new_dir)
 {
     if (new_dir == current_dir) return;
@@ -337,9 +297,7 @@ static void safe_change_direction(motor_dir_t new_dir)
     apply_motor(current_dir, pwm_value);
 }
 
-// ==========================
-// TAREA ADC
-// ==========================
+// Lee el ADC, calcula porcentaje y duty, y actualiza el motor
 static void adc_task(void *pvParameters)
 {
     while (1)
@@ -358,9 +316,7 @@ static void adc_task(void *pvParameters)
     }
 }
 
-// ==========================
-// TAREA BOTONES
-// ==========================
+// Detecta flancos en los botones y solicita cambio de dirección
 static void button_task(void *pvParameters)
 {
     bool last_der = true;
@@ -393,9 +349,7 @@ static void button_task(void *pvParameters)
     }
 }
 
-// ==========================
-// MAIN
-// ==========================
+// Inicializa periféricos y lanza las tareas
 void app_main(void)
 {
     gpio_init_all();
